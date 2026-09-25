@@ -4,13 +4,18 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEvent>
 #include <QFileInfo>
+#include <QGestureEvent>
 #include <QImage>
 #include <QImageReader>
+#include <QInputDevice>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QNativeGestureEvent>
 #include <QPainter>
+#include <QPinchGesture>
 #include <QResizeEvent>
 #include <QStringList>
 #include <QUrl>
@@ -26,6 +31,7 @@ public:
         setAcceptDrops(true);
         setFocusPolicy(Qt::StrongFocus);
         setCursor(Qt::OpenHandCursor);
+        grabGesture(Qt::PinchGesture);
     }
 
     bool loadFile(const QString& path, bool rebuildDirectory = true) {
@@ -77,24 +83,74 @@ protected:
     }
 
     void wheelEvent(QWheelEvent* event) override {
-        int px = event->pixelDelta().y();
-        const int pxAlt = event->pixelDelta().x();
-        if (qAbs(px) < qAbs(pxAlt))
-            px = pxAlt;
-        if (px != 0) {
-            const double exponent = qBound(-2.0, px / 120.0, 2.0);
-            zoomTo(scale * std::pow(2.0, 0.5 * exponent), event->position());
+        const QPoint pixels = event->pixelDelta();
+        const QPoint ticks = event->angleDelta();
+        const bool touchpad = event->device()
+            && event->device()->type() == QInputDevice::DeviceType::TouchPad;
+
+        if (event->modifiers().testFlag(Qt::ControlModifier)) {
+            const int delta = !pixels.isNull() ? dominantDelta(pixels) : dominantDelta(ticks);
+            if (delta == 0)
+                return;
+            const double exponent = qBound(-2.0, delta / 120.0, 2.0);
+            zoomTo(scale * std::pow(2.0, 0.5 * exponent));
             event->accept();
             return;
         }
-        int ticks = event->angleDelta().y();
-        const int ticksAlt = event->angleDelta().x();
-        if (qAbs(ticks) < qAbs(ticksAlt))
-            ticks = ticksAlt;
-        if (ticks == 0)
+
+        if (touchpad || !pixels.isNull()) {
+            const QPoint delta = !pixels.isNull() ? pixels : ticks;
+            if (delta.isNull())
+                return;
+            offsetX -= delta.x();
+            offsetY -= delta.y();
+            clampOffsets();
+            fitMode = false;
+            update();
+            event->accept();
             return;
-        zoomTo(scale * std::pow(2.0, 0.5 * ticks / 120.0), event->position());
+        }
+
+        const int delta = dominantDelta(ticks);
+        if (delta == 0)
+            return;
+        zoomTo(scale * std::pow(2.0, 0.5 * delta / 120.0));
         event->accept();
+    }
+
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::NativeGesture) {
+            auto* nativeEvent = static_cast<QNativeGestureEvent*>(event);
+            if (nativeEvent->gestureType() == Qt::ZoomNativeGesture) {
+                const double factor = 1.0 + nativeEvent->value();
+                if (factor > 0.0 && std::isfinite(factor))
+                    zoomTo(scale * factor);
+                nativeEvent->accept();
+                return true;
+            }
+            if (nativeEvent->gestureType() == Qt::PanNativeGesture) {
+                offsetX -= nativeEvent->delta().x();
+                offsetY -= nativeEvent->delta().y();
+                clampOffsets();
+                fitMode = false;
+                update();
+                nativeEvent->accept();
+                return true;
+            }
+        }
+        if (event->type() == QEvent::Gesture) {
+            auto* gestureEvent = static_cast<QGestureEvent*>(event);
+            auto* pinch = static_cast<QPinchGesture*>(gestureEvent->gesture(Qt::PinchGesture));
+            if (pinch) {
+                if (pinch->state() == Qt::GestureStarted)
+                    pinchStartScale = scale;
+                if (pinch->state() == Qt::GestureStarted || pinch->state() == Qt::GestureUpdated)
+                    zoomTo(pinchStartScale * pinch->totalScaleFactor());
+                gestureEvent->accept(Qt::PinchGesture);
+                return true;
+            }
+        }
+        return QWidget::event(event);
     }
 
     void mousePressEvent(QMouseEvent* event) override {
@@ -119,6 +175,7 @@ protected:
         const QPointF delta = event->position() - lastPos;
         offsetX += delta.x();
         offsetY += delta.y();
+        clampOffsets();
         lastPos = event->position();
         update();
     }
@@ -136,8 +193,8 @@ protected:
         case Qt::Key_0:
         case Qt::Key_1: reset1to1(); break;
         case Qt::Key_Plus:
-        case Qt::Key_Equal: zoomTo(scale * std::sqrt(2.0), center()); break;
-        case Qt::Key_Minus: zoomTo(scale / std::sqrt(2.0), center()); break;
+        case Qt::Key_Equal: zoomTo(scale * std::sqrt(2.0)); break;
+        case Qt::Key_Minus: zoomTo(scale / std::sqrt(2.0)); break;
         case Qt::Key_Right:
         case Qt::Key_Down: navigate(1); break;
         case Qt::Key_Left:
@@ -165,6 +222,10 @@ protected:
     }
 
 private:
+    static int dominantDelta(const QPoint& delta) {
+        return qAbs(delta.y()) >= qAbs(delta.x()) ? delta.y() : delta.x();
+    }
+
     int mipLevel(double targetScale) const {
         if (levels.isEmpty())
             return 0;
@@ -204,15 +265,30 @@ private:
         offsetY = (height() - levels.front().height() * scale) / 2.0;
     }
 
-    void zoomTo(double newZoom, QPointF center) {
+    void clampOffsets() {
         if (levels.isEmpty())
             return;
+        const double scaledWidth = levels.front().width() * scale;
+        const double scaledHeight = levels.front().height() * scale;
+        const double minOffsetX = scaledWidth > width() ? width() - scaledWidth : 0.0;
+        const double minOffsetY = scaledHeight > height() ? height() - scaledHeight : 0.0;
+        const double maxOffsetX = scaledWidth > width() ? 0.0 : width() - scaledWidth;
+        const double maxOffsetY = scaledHeight > height() ? 0.0 : height() - scaledHeight;
+        offsetX = std::clamp(offsetX, minOffsetX, maxOffsetX);
+        offsetY = std::clamp(offsetY, minOffsetY, maxOffsetY);
+    }
+
+    void zoomTo(double newZoom) {
+        if (levels.isEmpty())
+            return;
+        const QPointF zoomCenter = center();
         const double next = qBound(MIN_SCALE, newZoom, MAX_SCALE);
-        const double imgX = (center.x() - offsetX) / scale;
-        const double imgY = (center.y() - offsetY) / scale;
-        offsetX = center.x() - imgX * next;
-        offsetY = center.y() - imgY * next;
+        const double imgX = (zoomCenter.x() - offsetX) / scale;
+        const double imgY = (zoomCenter.y() - offsetY) / scale;
+        offsetX = zoomCenter.x() - imgX * next;
+        offsetY = zoomCenter.y() - imgY * next;
         scale = next;
+        clampOffsets();
         fitMode = false;
         update();
     }
@@ -264,6 +340,7 @@ private:
     double offsetY = 0.0;
     bool fitMode = false;
     bool dragging = false;
+    double pinchStartScale = 1.0;
     QPointF lastPos;
     qint64 lastClickMs = -1;
 
