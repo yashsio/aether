@@ -229,10 +229,11 @@ private:
     int mipLevel(double targetScale) const {
         if (levels.isEmpty())
             return 0;
-        if (levels.size() == 1)
+        if (targetScale >= 1.0)
             return 0;
-        const int index = static_cast<int>(std::floor(std::log2(targetScale) + 0.5));
-        return qBound(0, index, static_cast<int>(levels.size()) - 1);
+        const int maxLevel = static_cast<int>(levels.size()) - 1;
+        const int index = static_cast<int>(std::floor(-std::log2(targetScale)));
+        return qBound(0, index, maxLevel);
     }
 
     void fitNow() {
