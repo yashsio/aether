@@ -20,6 +20,7 @@
 #include <QNativeGestureEvent>
 #include <QPainter>
 #include <QPinchGesture>
+#include <QTransform>
 #include <QResizeEvent>
 #include <QStringList>
 #include <QUrl>
@@ -48,19 +49,12 @@ public:
         if (rebuildDirectory) {
             mFiles = imageFilesIn(path);
             mCurrent = mFiles.indexOf(QFileInfo(path).absoluteFilePath());
+            rotation = 0;
         }
 
-        levels.clear();
         mImage = image;
-        QImage current = image;
-        while (true) {
-            levels.push_back(current);
-            const int nw = qMax(1, current.width() / 2);
-            const int nh = qMax(1, current.height() / 2);
-            if (nw == current.width() && nh == current.height())
-                break;
-            current = current.scaled(nw, nh, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        }
+        rotation = 0;
+        rebuildDisplayImage();
 
         fitNow();
         QString title = QFileInfo(path).fileName() + " - aether";
@@ -195,11 +189,28 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent* event) override {
-        if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_M) {
-            showMetadata = !showMetadata;
-            update();
-            event->accept();
-            return;
+        if (event->modifiers() == Qt::ControlModifier) {
+            switch (event->key()) {
+            case Qt::Key_M:
+                showMetadata = !showMetadata;
+                update();
+                event->accept();
+                return;
+            case Qt::Key_R:
+                rotateRight();
+                event->accept();
+                return;
+            case Qt::Key_L:
+                rotateLeft();
+                event->accept();
+                return;
+            case Qt::Key_S:
+                saveRotation();
+                event->accept();
+                return;
+            default:
+                break;
+            }
         }
         switch (event->key()) {
         case Qt::Key_F: fitNow(); break;
@@ -367,12 +378,91 @@ private:
             mCurrent = -1;
             setWindowTitle(tr("aether"));
             mImage = QImage();
+            rotation = 0;
             update();
             return;
         }
         if (mCurrent >= mFiles.size())
             mCurrent = mFiles.size() - 1;
         loadFile(mFiles.at(mCurrent), false);
+    }
+
+    void rotateRight() {
+        rotation = (rotation + 90) % 360;
+        rebuildDisplayImage();
+        if (fitMode)
+            fitNow();
+        else
+            clampOffsets();
+        update();
+    }
+
+    void rotateLeft() {
+        rotation = (rotation + 270) % 360;
+        rebuildDisplayImage();
+        if (fitMode)
+            fitNow();
+        else
+            clampOffsets();
+        update();
+    }
+
+    void saveRotation() {
+        if (mFiles.isEmpty() || mCurrent < 0 || rotation == 0)
+            return;
+        QImage original(pathForCurrent());
+        if (original.isNull())
+            return;
+        QTransform t;
+        t.rotate(rotation);
+        QImage rotated = original.transformed(t, Qt::SmoothTransformation);
+        if (rotated.save(pathForCurrent())) {
+            rotation = 0;
+            loadFile(pathForCurrent(), false);
+        } else {
+            QMessageBox::critical(this, tr("Error"), tr("Failed to save rotated image"));
+        }
+    }
+
+    QString pathForCurrent() const {
+        if (mFiles.isEmpty() || mCurrent < 0)
+            return QString();
+        return mFiles.at(mCurrent);
+    }
+
+    void rebuildDisplayImage() {
+        if (mImage.isNull()) {
+            if (!levels.isEmpty())
+                mImage = levels.front();
+            else
+                return;
+        }
+        if (rotation == 0) {
+            levels.clear();
+            QImage current = mImage;
+            while (true) {
+                levels.push_back(current);
+                const int nw = qMax(1, current.width() / 2);
+                const int nh = qMax(1, current.height() / 2);
+                if (nw == current.width() && nh == current.height())
+                    break;
+                current = current.scaled(nw, nh, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            }
+            return;
+        }
+        QTransform t;
+        t.rotate(rotation);
+        QImage rotated = mImage.transformed(t, Qt::SmoothTransformation);
+        levels.clear();
+        QImage current = rotated;
+        while (true) {
+            levels.push_back(current);
+            const int nw = qMax(1, current.width() / 2);
+            const int nh = qMax(1, current.height() / 2);
+            if (nw == current.width() && nh == current.height())
+                    break;
+            current = current.scaled(nw, nh, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
     }
 
     void drawMetadata(QPainter& painter) {
@@ -419,6 +509,7 @@ private:
     bool fitMode = false;
     bool dragging = false;
     bool showMetadata = false;
+    int rotation = 0;
     double pinchStartScale = 1.0;
     QPointF lastPos;
     qint64 lastClickMs = -1;
