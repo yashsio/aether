@@ -2,8 +2,6 @@
 
 A minimal, fast, cross-platform image viewer in **C++17 + Qt Widgets**. 
 
-Still needed a lot of optimizations so not ideal for daily usage but i am working on that.
-
 ---
 
 ## Requirements
@@ -21,12 +19,12 @@ Still needed a lot of optimizations so not ideal for daily usage but i am workin
 ### On NixOS
 
 The repo ships a flake that provides the whole toolchain pinned to
-`nixos-unstable` (GCC, CMake, Ninja, `pkg-config`, `qt6.qtbase`,
+`nixos-unstable` (GCC, CMake, `pkg-config`, `qt6.qtbase`,
 `qt6.qtwayland`, `clangd`, `gdb`), with `QT_PLUGIN_PATH` pre-configured so the
 Wayland/X11 platform plugins are found:
 
     nix develop                                 # enter the dev shell
-    cmake -B build -G Ninja                     # configure
+    cmake -B build                              # configure
     cmake --build build                         # compile
     ./build/aether path/to/photo.jpg            # run
 
@@ -45,7 +43,7 @@ Choose the command to install dependencies as per your distro's package manager.
  
 Build & Run via the following commands:
 
-    cmake -B build -G Ninja
+    cmake -B build
     cmake --build build
     ./build/aether path/to/photo.jpg
 
