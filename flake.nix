@@ -20,7 +20,6 @@
           packages = with pkgs; [
             gcc
             cmake
-            ninja
             pkg-config
             qt.qtbase
             clang-tools
