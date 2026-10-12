@@ -68,8 +68,11 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.fillRect(rect(), Qt::black);
-        if (levels.isEmpty())
+        if (levels.isEmpty()) {
+            if (showHelp)
+                drawHelp(painter);
             return;
+        }
 
         const QImage& level = levels[mipLevel(scale)];
         const QRectF source(0, 0, level.width(), level.height());
@@ -81,6 +84,8 @@ protected:
         painter.drawImage(target, level, source);
         if (showMetadata)
             drawMetadata(painter);
+        if (showHelp)
+            drawHelp(painter);
     }
 
     void wheelEvent(QWheelEvent* event) override {
@@ -213,6 +218,11 @@ protected:
             }
         }
         switch (event->key()) {
+        case Qt::Key_Question:
+        case Qt::Key_Slash:
+            showHelp = !showHelp;
+            update();
+            break;
         case Qt::Key_F: fitNow(); break;
         case Qt::Key_0:
         case Qt::Key_1: reset1to1(); break;
@@ -226,7 +236,14 @@ protected:
         case Qt::Key_Delete:
         case Qt::Key_Backspace: deleteCurrentFile(); break;
         case Qt::Key_M: showMetadata = !showMetadata; update(); break;
-        case Qt::Key_Escape: window()->close(); break;
+        case Qt::Key_Escape:
+            if (showHelp) {
+                showHelp = false;
+                update();
+            } else {
+                window()->close();
+            }
+            break;
         default: QWidget::keyPressEvent(event); break;
         }
     }
@@ -499,6 +516,37 @@ private:
         painter.drawText(background.adjusted(6, 4, -6, -4), text);
     }
 
+    void drawHelp(QPainter& painter) {
+        QString text;
+        text += tr("Keys:\n");
+        text += tr("  F / Double-click: Toggle fit/1:1\n");
+        text += tr("  0/1: Reset to 1:1\n");
+        text += tr("  +/-: Zoom\n");
+        text += tr("  Arrow keys: Navigate images (wraps)\n");
+        text += tr("  Delete/Backspace: Delete current image\n");
+        text += tr("  Ctrl+M / M: Toggle metadata\n");
+        text += tr("  Ctrl+R: Rotate right (90°)\n");
+        text += tr("  Ctrl+L: Rotate left (90°)\n");
+        text += tr("  Ctrl+S: Save rotation to disk\n");
+        text += tr("  ? / /: Toggle this help\n");
+        text += tr("  Esc: Close / hide help\n");
+
+        QFont font = painter.font();
+        font.setPointSize(11);
+        painter.setFont(font);
+
+        QFontMetrics fm(font);
+        QRect textRect = fm.boundingRect(QRect(0, 0, width() - 40, height()), Qt::TextWordWrap, text);
+        textRect.adjust(0, 0, 12, 12);
+        QRect background((width() - textRect.width()) / 2, (height() - textRect.height()) / 2,
+                         textRect.width(), textRect.height());
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 200));
+        painter.drawRoundedRect(background, 6, 6);
+        painter.setPen(Qt::white);
+        painter.drawText(background.adjusted(10, 8, -10, -8), text);
+    }
+
     QList<QImage> levels;
     QImage mImage;
     QStringList mFiles;
@@ -509,6 +557,7 @@ private:
     bool fitMode = false;
     bool dragging = false;
     bool showMetadata = false;
+    bool showHelp = false;
     int rotation = 0;
     double pinchStartScale = 1.0;
     QPointF lastPos;
