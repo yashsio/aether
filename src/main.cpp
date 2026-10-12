@@ -7,6 +7,8 @@
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
+#include <QFontMetrics>
 #include <QGestureEvent>
 #include <QMessageBox>
 #include <QImage>
@@ -49,6 +51,7 @@ public:
         }
 
         levels.clear();
+        mImage = image;
         QImage current = image;
         while (true) {
             levels.push_back(current);
@@ -77,11 +80,13 @@ protected:
         const QImage& level = levels[mipLevel(scale)];
         const QRectF source(0, 0, level.width(), level.height());
         const QRectF target(offsetX,
-                            offsetY,
-                            levels.front().width() * scale,
-                            levels.front().height() * scale);
+                             offsetY,
+                             levels.front().width() * scale,
+                             levels.front().height() * scale);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
         painter.drawImage(target, level, source);
+        if (showMetadata)
+            drawMetadata(painter);
     }
 
     void wheelEvent(QWheelEvent* event) override {
@@ -190,6 +195,12 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent* event) override {
+        if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_M) {
+            showMetadata = !showMetadata;
+            update();
+            event->accept();
+            return;
+        }
         switch (event->key()) {
         case Qt::Key_F: fitNow(); break;
         case Qt::Key_0:
@@ -203,6 +214,7 @@ protected:
         case Qt::Key_Up: navigate(-1); break;
         case Qt::Key_Delete:
         case Qt::Key_Backspace: deleteCurrentFile(); break;
+        case Qt::Key_M: showMetadata = !showMetadata; update(); break;
         case Qt::Key_Escape: window()->close(); break;
         default: QWidget::keyPressEvent(event); break;
         }
@@ -354,6 +366,7 @@ private:
             levels.clear();
             mCurrent = -1;
             setWindowTitle(tr("aether"));
+            mImage = QImage();
             update();
             return;
         }
@@ -362,7 +375,42 @@ private:
         loadFile(mFiles.at(mCurrent), false);
     }
 
+    void drawMetadata(QPainter& painter) {
+        if (mFiles.isEmpty() || mCurrent < 0)
+            return;
+        const QString path = mFiles.at(mCurrent);
+        const QFileInfo info(path);
+
+        QString text;
+        text += tr("File: %1\n").arg(info.fileName());
+        text += tr("Path: %1\n").arg(info.absoluteFilePath());
+        text += tr("Size: %1 bytes\n").arg(info.size());
+        const QImage* img = &mImage;
+        if (!img->isNull())
+            text += tr("Resolution: %1 x %2\n").arg(img->width()).arg(img->height());
+        else if (!levels.isEmpty())
+            text += tr("Resolution: %1 x %2\n").arg(levels.front().width()).arg(levels.front().height());
+
+        text += tr("Modified: %1\n").arg(info.lastModified().toString(Qt::ISODate));
+
+        QFont font = painter.font();
+        font.setPointSize(10);
+        painter.setFont(font);
+
+        QFontMetrics fm(font);
+        QRect textRect = fm.boundingRect(QRect(0, 0, width() - 20, height()), Qt::TextWordWrap, text);
+        textRect.adjust(0, 0, 10, 10);
+
+        QRect background(textRect.x() + 8, textRect.y() + 8, textRect.width(), textRect.height());
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 180));
+        painter.drawRoundedRect(background, 4, 4);
+        painter.setPen(Qt::white);
+        painter.drawText(background.adjusted(6, 4, -6, -4), text);
+    }
+
     QList<QImage> levels;
+    QImage mImage;
     QStringList mFiles;
     int mCurrent = -1;
     double scale = 1.0;
@@ -370,6 +418,7 @@ private:
     double offsetY = 0.0;
     bool fitMode = false;
     bool dragging = false;
+    bool showMetadata = false;
     double pinchStartScale = 1.0;
     QPointF lastPos;
     qint64 lastClickMs = -1;
