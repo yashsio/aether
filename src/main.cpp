@@ -5,8 +5,10 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
+#include <QFile>
 #include <QFileInfo>
 #include <QGestureEvent>
+#include <QMessageBox>
 #include <QImage>
 #include <QImageReader>
 #include <QInputDevice>
@@ -199,6 +201,8 @@ protected:
         case Qt::Key_Down: navigate(1); break;
         case Qt::Key_Left:
         case Qt::Key_Up: navigate(-1); break;
+        case Qt::Key_Delete:
+        case Qt::Key_Backspace: deleteCurrentFile(); break;
         case Qt::Key_Escape: window()->close(); break;
         default: QWidget::keyPressEvent(event); break;
         }
@@ -326,11 +330,36 @@ private:
     void navigate(int offset) {
         if (mFiles.isEmpty() || mCurrent < 0)
             return;
-        const int next = mCurrent + offset;
-        if (next < 0 || next >= mFiles.size())
+        const int next = (mCurrent + offset) % mFiles.size();
+        if (next < 0)
+            mCurrent = mFiles.size() - 1;
+        else
+            mCurrent = next;
+        loadFile(mFiles.at(mCurrent), false);
+    }
+
+    void deleteCurrentFile() {
+        if (mFiles.isEmpty() || mCurrent < 0)
             return;
-        mCurrent = next;
-        loadFile(mFiles.at(next), false);
+        const QString path = mFiles.at(mCurrent);
+        const QString name = QFileInfo(path).fileName();
+
+        if (!QFile::remove(path)) {
+            QMessageBox::critical(this, tr("Error"), tr("Failed to delete \"%1\"").arg(name));
+            return;
+        }
+
+        mFiles.removeAt(mCurrent);
+        if (mFiles.isEmpty()) {
+            levels.clear();
+            mCurrent = -1;
+            setWindowTitle(tr("aether"));
+            update();
+            return;
+        }
+        if (mCurrent >= mFiles.size())
+            mCurrent = mFiles.size() - 1;
+        loadFile(mFiles.at(mCurrent), false);
     }
 
     QList<QImage> levels;
