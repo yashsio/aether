@@ -1,586 +1,144 @@
-#include <QApplication>
-#include <QCollator>
-#include <QDateTime>
-#include <QDir>
-#include <QDragEnterEvent>
-#include <QDropEvent>
-#include <QEvent>
-#include <QFile>
-#include <QFileInfo>
-#include <QFont>
-#include <QFontMetrics>
-#include <QGestureEvent>
-#include <QMessageBox>
-#include <QImage>
-#include <QImageReader>
-#include <QInputDevice>
-#include <QKeyEvent>
-#include <QMimeData>
-#include <QMouseEvent>
-#include <QNativeGestureEvent>
-#include <QPainter>
-#include <QPinchGesture>
-#include <QTransform>
-#include <QResizeEvent>
-#include <QStringList>
-#include <QUrl>
-#include <QWheelEvent>
-#include <QWidget>
+#include "app.hpp"
+#include "platform/connection.hpp"
+#include "platform/dnd.hpp"
+#include "platform/input.hpp"
+#include "platform/window.hpp"
 
-#include <algorithm>
-#include <cmath>
+#include <poll.h>
 
-class ImageView : public QWidget {
-public:
-    explicit ImageView(QWidget* parent = nullptr) : QWidget(parent) {
-        setAcceptDrops(true);
-        setFocusPolicy(Qt::StrongFocus);
-        setCursor(Qt::OpenHandCursor);
-        grabGesture(Qt::PinchGesture);
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+using namespace aether;
+
+namespace {
+
+// Optional frame-time instrumentation: AETHER_BENCH=1 prints the average
+// render+commit time every 60 frames to stderr.
+struct Bench {
+    bool enabled = std::getenv("AETHER_BENCH") != nullptr;
+    int frames = 0;
+    double total_ms = 0;
+
+    void add(double ms) {
+        if (!enabled)
+            return;
+        total_ms += ms;
+        if (++frames >= 60) {
+            std::fprintf(stderr, "[bench] avg frame: %.2f ms (%d frames)\n", total_ms / frames,
+                         frames);
+            frames = 0;
+            total_ms = 0;
+        }
+    }
+};
+
+double elapsed_ms(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+        .count();
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: aether <image>\n");
+        std::fprintf(stderr, "(files can also be dropped onto the window after launch)\n");
+        return 1;
     }
 
-    bool loadFile(const QString& path, bool rebuildDirectory = true) {
-        QImage image(path);
-        if (image.isNull()) {
-            setWindowTitle(tr("aether"));
-            return false;
-        }
-
-        if (rebuildDirectory) {
-            mFiles = imageFilesIn(path);
-            mCurrent = mFiles.indexOf(QFileInfo(path).absoluteFilePath());
-            rotation = 0;
-        }
-
-        mImage = image;
-        rotation = 0;
-        rebuildDisplayImage();
-
-        fitNow();
-        QString title = QFileInfo(path).fileName() + " - aether";
-        if (mFiles.size() > 1 && mCurrent >= 0)
-            title += QString(" (%1/%2)").arg(mCurrent + 1).arg(mFiles.size());
-        setWindowTitle(title);
-        return true;
+    std::string err;
+    Connection conn;
+    if (!conn.connect(&err)) {
+        std::fprintf(stderr, "aether: %s\n", err.c_str());
+        return 1;
     }
 
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.fillRect(rect(), Qt::black);
-        if (levels.isEmpty()) {
-            if (showHelp)
-                drawHelp(painter);
-            return;
-        }
-
-        const QImage& level = levels[mipLevel(scale)];
-        const QRectF source(0, 0, level.width(), level.height());
-        const QRectF target(offsetX,
-                             offsetY,
-                             levels.front().width() * scale,
-                             levels.front().height() * scale);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        painter.drawImage(target, level, source);
-        if (showMetadata)
-            drawMetadata(painter);
-        if (showHelp)
-            drawHelp(painter);
+    Window window(conn);
+    if (!window.ok()) {
+        std::fprintf(stderr, "aether: failed to create a Wayland surface "
+                             "(xdg-shell / wl_shm missing)\n");
+        return 1;
     }
 
-    void wheelEvent(QWheelEvent* event) override {
-        const QPoint pixels = event->pixelDelta();
-        const QPoint ticks = event->angleDelta();
-        const bool touchpad = event->device()
-            && event->device()->type() == QInputDevice::DeviceType::TouchPad;
+    App app(window);
+    window.set_events(&app);
 
-        if (event->modifiers().testFlag(Qt::ControlModifier)) {
-            const int delta = !pixels.isNull() ? dominantDelta(pixels) : dominantDelta(ticks);
-            if (delta == 0)
-                return;
-            const double exponent = qBound(-2.0, delta / 120.0, 2.0);
-            zoomTo(scale * std::pow(2.0, 0.5 * exponent));
-            event->accept();
-            return;
-        }
+    Input input(conn, app, window);
+    Dnd dnd(conn, app, window);
 
-        if (touchpad || !pixels.isNull()) {
-            const QPoint delta = !pixels.isNull() ? pixels : ticks;
-            if (delta.isNull())
-                return;
-            offsetX -= delta.x();
-            offsetY -= delta.y();
-            clampOffsets();
-            fitMode = false;
-            update();
-            event->accept();
-            return;
-        }
+    app.load_file(argv[1]);
 
-        const int delta = dominantDelta(ticks);
-        if (delta == 0)
-            return;
-        zoomTo(scale * std::pow(2.0, 0.5 * delta / 120.0));
-        event->accept();
-    }
+    Bench bench;
+    wl_display* display = conn.display();
+    const int fd = wl_display_get_fd(display);
+    bool running = true;
 
-    bool event(QEvent* event) override {
-        if (event->type() == QEvent::NativeGesture) {
-            auto* nativeEvent = static_cast<QNativeGestureEvent*>(event);
-            if (nativeEvent->gestureType() == Qt::ZoomNativeGesture) {
-                const double factor = 1.0 + nativeEvent->value();
-                if (factor > 0.0 && std::isfinite(factor))
-                    zoomTo(scale * factor);
-                nativeEvent->accept();
-                return true;
-            }
-            if (nativeEvent->gestureType() == Qt::PanNativeGesture) {
-                offsetX -= nativeEvent->delta().x();
-                offsetY -= nativeEvent->delta().y();
-                clampOffsets();
-                fitMode = false;
-                update();
-                nativeEvent->accept();
-                return true;
-            }
-        }
-        if (event->type() == QEvent::Gesture) {
-            auto* gestureEvent = static_cast<QGestureEvent*>(event);
-            auto* pinch = static_cast<QPinchGesture*>(gestureEvent->gesture(Qt::PinchGesture));
-            if (pinch) {
-                if (pinch->state() == Qt::GestureStarted)
-                    pinchStartScale = scale;
-                if (pinch->state() == Qt::GestureStarted || pinch->state() == Qt::GestureUpdated)
-                    zoomTo(pinchStartScale * pinch->totalScaleFactor());
-                gestureEvent->accept(Qt::PinchGesture);
-                return true;
-            }
-        }
-        return QWidget::event(event);
-    }
-
-    void mousePressEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton)
-            return;
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (lastClickMs >= 0 && now - lastClickMs < 400) {
-            toggleFit();
-            lastClickMs = -1;
+    while (running) {
+        if (window.dispatch_pending()) {
+            // deliver anything already queued
         } else {
-            lastClickMs = now;
+            break; // protocol error / display gone
         }
-        setFocus();
-        dragging = true;
-        lastPos = event->position();
-        setCursor(Qt::ClosedHandCursor);
-    }
+        if (!window.flush())
+            break;
 
-    void mouseMoveEvent(QMouseEvent* event) override {
-        if (!dragging)
-            return;
-        const QPointF delta = event->position() - lastPos;
-        offsetX += delta.x();
-        offsetY += delta.y();
-        clampOffsets();
-        lastPos = event->position();
-        update();
-    }
+        if (window.dirty()) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool ok = window.render(
+                [&](uint32_t* px, int w, int h) { app.compose(px, w, h); });
+            if (ok) {
+                window.clear_dirty();
+                bench.add(elapsed_ms(t0));
+                continue; // process any events the commit produced
+            }
+            // render() failed: not configured yet (or zero-sized) - we must
+            // read events before trying again, so fall through to the wait.
+        }
 
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton)
-            return;
-        dragging = false;
-        setCursor(Qt::OpenHandCursor);
-    }
+        // Nothing to draw: sleep until the next event or timer deadline.
+        const int timeout = static_cast<int>(app.timer_ms());
 
-    void keyPressEvent(QKeyEvent* event) override {
-        if (event->modifiers() == Qt::ControlModifier) {
-            switch (event->key()) {
-            case Qt::Key_M:
-                showMetadata = !showMetadata;
-                update();
-                event->accept();
-                return;
-            case Qt::Key_R:
-                rotateRight();
-                event->accept();
-                return;
-            case Qt::Key_L:
-                rotateLeft();
-                event->accept();
-                return;
-            case Qt::Key_S:
-                saveRotation();
-                event->accept();
-                return;
-            default:
+        while (wl_display_prepare_read(display) != 0) {
+            if (wl_display_dispatch_pending(display) < 0) {
+                running = false;
                 break;
             }
         }
-        switch (event->key()) {
-        case Qt::Key_Question:
-        case Qt::Key_Slash:
-            showHelp = !showHelp;
-            update();
+        if (!running)
             break;
-        case Qt::Key_F: fitNow(); break;
-        case Qt::Key_0:
-        case Qt::Key_1: reset1to1(); break;
-        case Qt::Key_Plus:
-        case Qt::Key_Equal: zoomTo(scale * std::sqrt(2.0)); break;
-        case Qt::Key_Minus: zoomTo(scale / std::sqrt(2.0)); break;
-        case Qt::Key_Right:
-        case Qt::Key_Down: navigate(1); break;
-        case Qt::Key_Left:
-        case Qt::Key_Up: navigate(-1); break;
-        case Qt::Key_Delete:
-        case Qt::Key_Backspace: deleteCurrentFile(); break;
-        case Qt::Key_M: showMetadata = !showMetadata; update(); break;
-        case Qt::Key_Escape:
-            if (showHelp) {
-                showHelp = false;
-                update();
-            } else {
-                window()->close();
-            }
+
+        if (wl_display_flush(display) < 0 && errno != EAGAIN) {
+            wl_display_cancel_read(display);
             break;
-        default: QWidget::keyPressEvent(event); break;
-        }
-    }
-
-    void dragEnterEvent(QDragEnterEvent* event) override {
-        if (event->mimeData()->hasUrls())
-            event->acceptProposedAction();
-    }
-
-    void dropEvent(QDropEvent* event) override {
-        const QList<QUrl> urls = event->mimeData()->urls();
-        if (!urls.isEmpty())
-            loadFile(urls.first().toLocalFile());
-    }
-
-    void resizeEvent(QResizeEvent* event) override {
-        QWidget::resizeEvent(event);
-        if (fitMode)
-            fitNow();
-    }
-
-private:
-    static int dominantDelta(const QPoint& delta) {
-        return qAbs(delta.y()) >= qAbs(delta.x()) ? delta.y() : delta.x();
-    }
-
-    int mipLevel(double targetScale) const {
-        if (levels.isEmpty())
-            return 0;
-        if (targetScale >= 1.0)
-            return 0;
-        const int maxLevel = static_cast<int>(levels.size()) - 1;
-        const int index = static_cast<int>(std::floor(-std::log2(targetScale)));
-        return qBound(0, index, maxLevel);
-    }
-
-    void fitNow() {
-        if (levels.isEmpty())
-            return;
-        const double sw = static_cast<double>(width()) / levels.front().width();
-        const double sh = static_cast<double>(height()) / levels.front().height();
-        scale = std::min(sw, sh) * 1;
-        centerImage();
-        fitMode = true;
-        update();
-    }
-
-    void reset1to1() {
-        scale = 1.0;
-        centerImage();
-        fitMode = false;
-        update();
-    }
-
-    void toggleFit() {
-        if (fitMode)
-            reset1to1();
-        else
-            fitNow();
-    }
-
-    void centerImage() {
-        offsetX = (width() - levels.front().width() * scale) / 2.0;
-        offsetY = (height() - levels.front().height() * scale) / 2.0;
-    }
-
-    void clampOffsets() {
-        if (levels.isEmpty())
-            return;
-        const double scaledWidth = levels.front().width() * scale;
-        const double scaledHeight = levels.front().height() * scale;
-        const double minOffsetX = scaledWidth > width() ? width() - scaledWidth : 0.0;
-        const double minOffsetY = scaledHeight > height() ? height() - scaledHeight : 0.0;
-        const double maxOffsetX = scaledWidth > width() ? 0.0 : width() - scaledWidth;
-        const double maxOffsetY = scaledHeight > height() ? 0.0 : height() - scaledHeight;
-        offsetX = std::clamp(offsetX, minOffsetX, maxOffsetX);
-        offsetY = std::clamp(offsetY, minOffsetY, maxOffsetY);
-    }
-
-    void zoomTo(double newZoom) {
-        if (levels.isEmpty())
-            return;
-        const QPointF zoomCenter = center();
-        const double next = qBound(MIN_SCALE, newZoom, MAX_SCALE);
-        const double imgX = (zoomCenter.x() - offsetX) / scale;
-        const double imgY = (zoomCenter.y() - offsetY) / scale;
-        offsetX = zoomCenter.x() - imgX * next;
-        offsetY = zoomCenter.y() - imgY * next;
-        scale = next;
-        clampOffsets();
-        fitMode = false;
-        update();
-    }
-
-    QPointF center() const {
-        return QPointF(width() / 2.0, height() / 2.0);
-    }
-
-    static QStringList imageFilesIn(const QString& path) {
-        QStringList supported;
-        const auto formats = QImageReader::supportedImageFormats();
-        for (const QByteArray& format : formats)
-            supported << QString::fromLatin1(format).toLower();
-
-        QDir dir(QFileInfo(path).absolutePath());
-        const QFileInfo current(path);
-        QStringList files;
-        const auto infos = dir.entryInfoList(QDir::Files, QDir::NoSort);
-        for (const QFileInfo& info : infos) {
-            if (supported.contains(info.suffix().toLower()))
-                files << info.absoluteFilePath();
-        }
-        if (!files.contains(current.absoluteFilePath()))
-            files << current.absoluteFilePath();
-
-        QCollator collator;
-        collator.setNumericMode(true);
-        std::sort(files.begin(), files.end(), [&collator](const QString& a, const QString& b) {
-            return collator.compare(a, b) < 0;
-        });
-        return files;
-    }
-
-    void navigate(int offset) {
-        if (mFiles.isEmpty() || mCurrent < 0)
-            return;
-        const int next = (mCurrent + offset) % mFiles.size();
-        if (next < 0)
-            mCurrent = mFiles.size() - 1;
-        else
-            mCurrent = next;
-        loadFile(mFiles.at(mCurrent), false);
-    }
-
-    void deleteCurrentFile() {
-        if (mFiles.isEmpty() || mCurrent < 0)
-            return;
-        const QString path = mFiles.at(mCurrent);
-        const QString name = QFileInfo(path).fileName();
-
-        if (!QFile::remove(path)) {
-            QMessageBox::critical(this, tr("Error"), tr("Failed to delete \"%1\"").arg(name));
-            return;
         }
 
-        mFiles.removeAt(mCurrent);
-        if (mFiles.isEmpty()) {
-            levels.clear();
-            mCurrent = -1;
-            setWindowTitle(tr("aether"));
-            mImage = QImage();
-            rotation = 0;
-            update();
-            return;
+        pollfd pfd{fd, POLLIN, 0};
+        const int r = poll(&pfd, 1, timeout);
+        if (r < 0 && errno != EINTR) {
+            wl_display_cancel_read(display);
+            break;
         }
-        if (mCurrent >= mFiles.size())
-            mCurrent = mFiles.size() - 1;
-        loadFile(mFiles.at(mCurrent), false);
-    }
-
-    void rotateRight() {
-        rotation = (rotation + 90) % 360;
-        rebuildDisplayImage();
-        if (fitMode)
-            fitNow();
-        else
-            clampOffsets();
-        update();
-    }
-
-    void rotateLeft() {
-        rotation = (rotation + 270) % 360;
-        rebuildDisplayImage();
-        if (fitMode)
-            fitNow();
-        else
-            clampOffsets();
-        update();
-    }
-
-    void saveRotation() {
-        if (mFiles.isEmpty() || mCurrent < 0 || rotation == 0)
-            return;
-        QImage original(pathForCurrent());
-        if (original.isNull())
-            return;
-        QTransform t;
-        t.rotate(rotation);
-        QImage rotated = original.transformed(t, Qt::SmoothTransformation);
-        if (rotated.save(pathForCurrent())) {
-            rotation = 0;
-            loadFile(pathForCurrent(), false);
-        } else {
-            QMessageBox::critical(this, tr("Error"), tr("Failed to save rotated image"));
+        if (r == 0) {
+            wl_display_cancel_read(display);
+            app.on_timer();
+            continue;
         }
-    }
-
-    QString pathForCurrent() const {
-        if (mFiles.isEmpty() || mCurrent < 0)
-            return QString();
-        return mFiles.at(mCurrent);
-    }
-
-    void rebuildDisplayImage() {
-        if (mImage.isNull()) {
-            if (!levels.isEmpty())
-                mImage = levels.front();
-            else
-                return;
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            wl_display_cancel_read(display);
+            break;
         }
-        if (rotation == 0) {
-            levels.clear();
-            QImage current = mImage;
-            while (true) {
-                levels.push_back(current);
-                const int nw = qMax(1, current.width() / 2);
-                const int nh = qMax(1, current.height() / 2);
-                if (nw == current.width() && nh == current.height())
-                    break;
-                current = current.scaled(nw, nh, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-            }
-            return;
-        }
-        QTransform t;
-        t.rotate(rotation);
-        QImage rotated = mImage.transformed(t, Qt::SmoothTransformation);
-        levels.clear();
-        QImage current = rotated;
-        while (true) {
-            levels.push_back(current);
-            const int nw = qMax(1, current.width() / 2);
-            const int nh = qMax(1, current.height() / 2);
-            if (nw == current.width() && nh == current.height())
-                    break;
-            current = current.scaled(nw, nh, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        }
+        if (wl_display_read_events(display) < 0)
+            break;
+        if (wl_display_dispatch_pending(display) < 0)
+            break;
+
+        if (!window.running())
+            running = false;
     }
 
-    void drawMetadata(QPainter& painter) {
-        if (mFiles.isEmpty() || mCurrent < 0)
-            return;
-        const QString path = mFiles.at(mCurrent);
-        const QFileInfo info(path);
-
-        QString text;
-        text += tr("File: %1\n").arg(info.fileName());
-        text += tr("Path: %1\n").arg(info.absoluteFilePath());
-        text += tr("Size: %1 bytes\n").arg(info.size());
-        const QImage* img = &mImage;
-        if (!img->isNull())
-            text += tr("Resolution: %1 x %2\n").arg(img->width()).arg(img->height());
-        else if (!levels.isEmpty())
-            text += tr("Resolution: %1 x %2\n").arg(levels.front().width()).arg(levels.front().height());
-
-        text += tr("Modified: %1\n").arg(info.lastModified().toString(Qt::ISODate));
-
-        QFont font = painter.font();
-        font.setPointSize(10);
-        painter.setFont(font);
-
-        QFontMetrics fm(font);
-        QRect textRect = fm.boundingRect(QRect(0, 0, width() - 20, height()), Qt::TextWordWrap, text);
-        textRect.adjust(0, 0, 10, 10);
-
-        QRect background(textRect.x() + 8, textRect.y() + 8, textRect.width(), textRect.height());
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 0, 0, 180));
-        painter.drawRoundedRect(background, 4, 4);
-        painter.setPen(Qt::white);
-        painter.drawText(background.adjusted(6, 4, -6, -4), text);
-    }
-
-    void drawHelp(QPainter& painter) {
-        QString text;
-        text += tr("Keys:\n");
-        text += tr("  F / Double-click: Toggle fit/1:1\n");
-        text += tr("  0/1: Reset to 1:1\n");
-        text += tr("  +/-: Zoom\n");
-        text += tr("  Arrow keys: Navigate images (wraps)\n");
-        text += tr("  Delete/Backspace: Delete current image\n");
-        text += tr("  Ctrl+M / M: Toggle metadata\n");
-        text += tr("  Ctrl+R: Rotate right (90°)\n");
-        text += tr("  Ctrl+L: Rotate left (90°)\n");
-        text += tr("  Ctrl+S: Save rotation to disk\n");
-        text += tr("  ? / /: Toggle this help\n");
-        text += tr("  Esc: Close / hide help\n");
-
-        QFont font = painter.font();
-        font.setPointSize(11);
-        painter.setFont(font);
-
-        QFontMetrics fm(font);
-        QRect textRect = fm.boundingRect(QRect(0, 0, width() - 40, height()), Qt::TextWordWrap, text);
-        textRect.adjust(0, 0, 12, 12);
-        QRect background((width() - textRect.width()) / 2, (height() - textRect.height()) / 2,
-                         textRect.width(), textRect.height());
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 0, 0, 200));
-        painter.drawRoundedRect(background, 6, 6);
-        painter.setPen(Qt::white);
-        painter.drawText(background.adjusted(10, 8, -10, -8), text);
-    }
-
-    QList<QImage> levels;
-    QImage mImage;
-    QStringList mFiles;
-    int mCurrent = -1;
-    double scale = 1.0;
-    double offsetX = 0.0;
-    double offsetY = 0.0;
-    bool fitMode = false;
-    bool dragging = false;
-    bool showMetadata = false;
-    bool showHelp = false;
-    int rotation = 0;
-    double pinchStartScale = 1.0;
-    QPointF lastPos;
-    qint64 lastClickMs = -1;
-
-    static constexpr double MIN_SCALE = 0.005;
-    static constexpr double MAX_SCALE = 64.0;
-};
-
-#ifndef AETHER_NO_MAIN
-int main(int argc, char** argv) {
-    QApplication app(argc, argv);
-
-    ImageView viewer;
-    viewer.resize(1280, 800);
-    if (argc > 1) {
-        viewer.loadFile(QString::fromLocal8Bit(argv[1]));
-    } else {
-        qWarning("usage: aether <image>");
-        qWarning("(drop an image onto the window after launch)");
-    }
-    viewer.show();
-
-    return app.exec();
+    return 0;
 }
-#endif
