@@ -32,29 +32,19 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            pkg-config \
-            libwayland-dev \
-            libwayland-bin \
-            wayland-protocols \
-            libxkbcommon-dev \
-            libffi-dev \
-            libwebp-dev \
-            clang-tools \
-            gdb
+      - name: Install Nix
+        uses: cachix/install-nix-action@v32
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure and build
+      - name: Configure, build, and package
         run: |
-          cmake -B build
-          cmake --build build --config Release
-
-      - name: Package build
-        run: tar -czf "project-${RELEASE_TAG}-linux-x64.tar.gz" build/
+          nix develop --command bash -c '
+            set -euo pipefail
+            cmake -B build
+            cmake --build build --config Release
+            tar -czf "project-${RELEASE_TAG}-linux-x64.tar.gz" build/
+          '
 
       - name: Upload package
         uses: actions/upload-artifact@v4
