@@ -43,7 +43,7 @@ jobs:
             set -euo pipefail
             cmake -B build
             cmake --build build --config Release
-            tar -czf "project-${RELEASE_TAG}-linux-x64.tar.gz" build/
+            tar -czf "aether-${RELEASE_TAG}-linux-x64.tar.gz" build/
           '
 
       - name: Upload package
