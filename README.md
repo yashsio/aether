@@ -43,6 +43,10 @@ The application links only these (plus a static libwebp build). Everything
 above the platform layer — image decoding/encoding, mipmap generation, font
 rasterization — is compiled in.
 
+> **Note:** building from source requires a recent Wayland stack (Wayland ≥ 1.23
+> and wayland-protocols providing xdg-shell v5). On older distributions, use
+> the prebuilt static binary instead.
+
 WebP is enabled by default: CMake fetches a pinned libwebp release
 (v1.6.0, SHA-256 verified) and builds it statically. Pass
 `-DAETHER_WEBP=OFF` to omit it, or `-DAETHER_WEBP_SYSTEM=ON` to link a
