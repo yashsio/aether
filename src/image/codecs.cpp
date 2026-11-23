@@ -114,10 +114,6 @@ void register_stb_codecs(std::vector<Codec>& v) {
     v.push_back({"psd", {"psd"}, decode_stb, nullptr});
     v.push_back({"pnm", {"pnm", "ppm", "pgm", "pbm"}, decode_stb, nullptr});
     v.push_back({"pic", {"pic"}, decode_stb, nullptr});
-    // Future formats go here, e.g.:
-    // #ifdef AETHER_WEBP
-    //     register_webp_codec(v);
-    // #endif
 }
 
 } // namespace
@@ -125,6 +121,7 @@ void register_stb_codecs(std::vector<Codec>& v) {
 #ifdef AETHER_WEBP
 void register_webp_codec(std::vector<Codec>& v); // codec_webp.cpp
 #endif
+void register_svg_codec(std::vector<Codec>& v); // codec_svg.cpp
 
 const std::vector<Codec>& codecs() {
     static const std::vector<Codec> all = [] {
@@ -133,6 +130,7 @@ const std::vector<Codec>& codecs() {
 #ifdef AETHER_WEBP
         register_webp_codec(v);
 #endif
+        register_svg_codec(v);
         return v;
     }();
     return all;

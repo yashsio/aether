@@ -13,7 +13,9 @@ font rasterizer are vendored (stb).
 ## Features
 
 - **Formats** (decode): PNG, JPEG, BMP, TGA, GIF, HDR, PSD, PNM (PPM/PGM/PBM),
-  PIC. **Encode** (for rotation save): PNG, JPEG, BMP, TGA.
+  PIC, WebP (default build), SVG (rasterized with nanosvg). **Encode** (for
+  rotation save): PNG, JPEG, BMP, TGA, WebP (lossless). Rotating an SVG writes
+  a `<name>.rotated.png` sibling rather than touching the vector source.
 - **Navigation**: browse a folder with the arrow keys (wraps around), natural
   sort (`img2.png` before `img10.png`).
 - **View**: fit-to-window and 1:1, zoom in/out, free pan by dragging.
@@ -37,8 +39,15 @@ font rasterizer are vendored (stb).
   - `libxkbcommon` (keyboard layout handling)
   - `libffi` (transitive dependency of `wayland-client`)
 
-The application links only these. Everything above the platform layer — image
-decoding/encoding, mipmap generation, font rasterization — is compiled in.
+The application links only these (plus a static libwebp build). Everything
+above the platform layer — image decoding/encoding, mipmap generation, font
+rasterization — is compiled in.
+
+WebP is enabled by default: CMake fetches a pinned libwebp release
+(v1.6.0, SHA-256 verified) and builds it statically. Pass
+`-DAETHER_WEBP=OFF` to omit it, or `-DAETHER_WEBP_SYSTEM=ON` to link a
+system libwebp through `pkg-config` instead (what the Nix package does).
+SVG support is always compiled in via the vendored nanosvg.
 
 ---
 
@@ -96,9 +105,19 @@ other images in that directory. A rotation operation is saved with `Ctrl+S` rewr
 
 Just press the `?` key or `/` for the help overlay at runtime.
 
+### SVG notes
+
+SVG is rasterized once at its natural size (capped at 4096 px on the long
+edge), then treated like any other bitmap, so it softens when zoomed past 1:1.
+nanosvg covers shapes, paths, transforms, gradients and clip paths, but not
+text, filters, CSS selectors or external references. Because there is no SVG
+encoder, `Ctrl+S` after rotating an SVG writes `photo.rotated.png` next to
+`photo.svg` and leaves the original untouched.
+
 ---
 
 ## License
 
-Third-party code under `third_party/stb/` is public domain (see the headers).
+Third-party code under `third_party/stb/` is public domain (see the headers),
+and `third_party/nanosvg/` is zlib-licensed (see its headers).
 The rest of the project is licensed under [GPL-3.0](LICENSE)

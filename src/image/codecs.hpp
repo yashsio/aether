@@ -12,10 +12,10 @@ namespace aether {
 
 // A codec knows how to decode and/or encode one or more file formats.
 //
-// To add a new format (e.g. WebP):
+// To add a new format (e.g. AVIF):
 //   1. write a register_<fmt>_codec(std::vector<Codec>&) in its own TU
 //   2. call it from codecs() in codecs.cpp, ideally behind a CMake option
-//      (see the AETHER_WEBP scaffold in CMakeLists.txt)
+//      (see the optional AETHER_WEBP codec in CMakeLists.txt)
 struct Codec {
     const char* name;                    // "png", "jpg", ...
     std::vector<const char*> extensions; // lower-case, no dot

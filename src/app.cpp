@@ -5,6 +5,7 @@
 #include "image/ops.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -25,6 +26,15 @@ int64_t now_ms() {
 
 std::string filename_of(const std::string& path) {
     return fs::path(path).filename().string();
+}
+
+std::string lowercase_extension(const fs::path& path) {
+    std::string ext = path.extension().string();
+    if (!ext.empty())
+        ext.erase(0, 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext;
 }
 
 std::string modified_iso(const std::string& path) {
@@ -276,6 +286,20 @@ void App::save_rotation() {
         return;
     }
     Image rotated = rotate_quarters(original, mRotation / 90);
+
+    // SVG is vector and has no encoder; never overwrite it with raster bytes.
+    // Save the rotated raster next to it (photo.svg -> photo.rotated.png).
+    const fs::path source(path);
+    if (lowercase_extension(source) == "svg") {
+        const fs::path sibling =
+            source.parent_path() / (source.stem().string() + ".rotated.png");
+        if (save_image(sibling.string(), rotated, &err))
+            set_status("Saved rotation to " + sibling.filename().string());
+        else
+            set_status("Failed to save rotated image: " + err);
+        return;
+    }
+
     if (save_image(path, rotated, &err)) {
         mRotation = 0;
         load_file(path, false);

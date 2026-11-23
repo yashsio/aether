@@ -172,7 +172,11 @@ void test_codec_roundtrip() {
     // Extension lookup is case-insensitive.
     CHECK(aether::codec_for_extension("PNG") != nullptr);
     CHECK(aether::codec_for_extension("JpEg") != nullptr);
-    CHECK(aether::codec_for_extension("webp") == nullptr); // intentionally absent
+#ifdef AETHER_WEBP
+    CHECK(aether::codec_for_extension("webp") != nullptr);
+#else
+    CHECK(aether::codec_for_extension("webp") == nullptr); // not compiled in
+#endif
     CHECK(aether::codec_for_extension("xyz") == nullptr);
 
     // JPEG: decode must succeed with matching dims (lossy content).
@@ -188,6 +192,30 @@ void test_codec_roundtrip() {
             CHECK(out.w == src.w && out.h == src.h);
         }
     }
+
+#ifdef AETHER_WEBP
+    // WebP is encoded losslessly, so RGBA (including alpha) round-trips exactly.
+    {
+        const aether::Codec* webp = aether::codec_for_extension("webp");
+        CHECK(webp && webp->encode && webp->decode);
+        if (webp && webp->encode) {
+            Image alpha = Image::create(2, 2);
+            put(alpha, 0, 0, 10, 20, 30, 0);
+            put(alpha, 1, 0, 200, 100, 50, 64);
+            put(alpha, 0, 1, 1, 2, 3, 128);
+            put(alpha, 1, 1, 9, 8, 7, 255);
+
+            std::string err;
+            for (const Image* in : {&src, &alpha}) {
+                const std::vector<uint8_t> bytes = webp->encode(*in, &err);
+                CHECK(!bytes.empty());
+                Image out;
+                CHECK(aether::decode_image(bytes.data(), bytes.size(), &out, &err));
+                CHECK(pixels_equal(out, *in));
+            }
+        }
+    }
+#endif
 
     // Garbage input fails cleanly with a message.
     {
@@ -226,6 +254,45 @@ void test_read_file() {
     std::vector<uint8_t> bytes;
     std::string err;
     CHECK(!aether::read_file("aether_definitely_missing_file.png", &bytes, &err));
+    CHECK(!err.empty());
+}
+
+void test_svg_decode() {
+    const aether::Codec* codec = aether::codec_for_extension("svg");
+    CHECK(codec != nullptr);
+    CHECK(codec && codec->decode != nullptr);
+    CHECK(codec && codec->encode == nullptr); // vector source, no writer
+
+    const std::string svg =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"4\">"
+        "<rect width=\"8\" height=\"4\" fill=\"#ff0000\"/></svg>";
+    Image img;
+    std::string err;
+    CHECK(aether::decode_image(reinterpret_cast<const uint8_t*>(svg.data()), svg.size(),
+                               &img, &err));
+    CHECK(img.w == 8 && img.h == 4);
+    if (img.w == 8 && img.h == 4) {
+        uint8_t p[4];
+        get(img, 4, 2, p);
+        CHECK(p[0] == 255 && p[1] == 0 && p[2] == 0 && p[3] == 255);
+    }
+
+    // A hostile declared size is clamped instead of allocated at face value.
+    const std::string huge =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100000\" height=\"2\">"
+        "<rect width=\"100000\" height=\"2\" fill=\"#00ff00\"/></svg>";
+    Image big;
+    err.clear();
+    CHECK(aether::decode_image(reinterpret_cast<const uint8_t*>(huge.data()), huge.size(),
+                               &big, &err));
+    CHECK(big.w == 4096 && big.h == 1);
+
+    // Non-SVG text is rejected by the sniff, not misparsed into a blank image.
+    const std::string html = "<html><body>hello</body></html>";
+    Image out;
+    err.clear();
+    CHECK(!aether::decode_image(reinterpret_cast<const uint8_t*>(html.data()), html.size(),
+                                &out, &err));
     CHECK(!err.empty());
 }
 
@@ -290,6 +357,7 @@ int main() {
     test_build_mips();
     test_codec_roundtrip();
     test_save_image();
+    test_svg_decode();
     test_read_file();
     test_render_is_opaque();
     if (g_failures) {
