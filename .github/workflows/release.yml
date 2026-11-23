@@ -50,7 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-files
-          path: project-${{ env.RELEASE_TAG }}-linux-x64.tar.gz
+          path: aether-${{ env.RELEASE_TAG }}-linux-x64.tar.gz
           if-no-files-found: error
 
   release:
