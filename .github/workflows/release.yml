@@ -23,8 +23,16 @@ env:
 
 jobs:
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Check out source
@@ -46,13 +54,13 @@ jobs:
           install -m755 result/bin/aether dist/aether
           cp README.md LICENSE dist/
           strip --strip-all dist/aether
-          tar -C dist -czf "aether-${RELEASE_TAG}-linux-x86_64-static.tar.gz" .
+          tar -C dist -czf "aether-${RELEASE_TAG}-linux-${{ matrix.arch }}.tar.gz" .
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: release-files
-          path: aether-${{ env.RELEASE_TAG }}-linux-x86_64-static.tar.gz
+          name: release-files-${{ matrix.arch }}
+          path: aether-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -63,11 +71,12 @@ jobs:
       contents: write
 
     steps:
-      - name: Download package
+      - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: release-files
+          pattern: release-files-*
           path: dist/
+          merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v3
